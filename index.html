@@ -39,11 +39,13 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;}
 .live-dot.ok{animation:pulse 2s infinite;}
 .live-dot.err{background:var(--red);}
+.live-dot.closed{background:var(--accent2);}
 .live-dot.load{background:var(--accent2);}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(0,229,160,.4);}50%{box-shadow:0 0 0 6px rgba(0,229,160,0);}}
 .live-label{font-family:var(--font-mono);font-size:10px;letter-spacing:1px;}
 .live-label.ok{color:var(--accent);}
 .live-label.err{color:var(--red);}
+.live-label.closed{color:var(--accent2);}
 .live-label.load{color:var(--accent2);}
 .mkt-badge{font-family:var(--font-mono);font-size:10px;padding:3px 9px;border-radius:8px;border:1px solid;}
 .mkt-open{background:rgba(0,229,160,.1);border-color:rgba(0,229,160,.3);color:var(--accent);}
@@ -66,6 +68,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .banner-live{background:rgba(0,229,160,.07);border-color:rgba(0,229,160,.25);color:var(--accent);}
 .banner-delay{background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.25);color:var(--accent2);}
 .banner-err{background:rgba(255,77,109,.07);border-color:rgba(255,77,109,.25);color:var(--red);}
+.banner-closed{background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.25);color:var(--accent2);}
 .banner-load{background:rgba(56,189,248,.07);border-color:rgba(56,189,248,.25);color:var(--blue);}
 
 /* MARKET PULSE */
@@ -448,19 +451,37 @@ async function fetchYF(metas) {
   return {ok:false, err:'All proxies failed'};
 }
 
-function mockData() {
-  // Realistic base PSX prices with tiny time-based variation
-  const v = (Date.now()/1000%100)/10000;
-  return {
-    ENGRO:{price:284+v*2,  chg:2.1+v,  pct:0.74+v*0.1,  vol:1200000,open:282, hi:287, lo:281},
-    HBL:  {price:123-v,    chg:-0.8,   pct:-0.64,        vol:2100000,open:124, hi:124.5,lo:122},
-    LUCK: {price:1042+v*5, chg:5.8+v,  pct:0.56,         vol:480000, open:1036,hi:1048, lo:1034},
-    PSO:  {price:398-v*2,  chg:-3.2,   pct:-0.80,        vol:890000, open:401, hi:402,  lo:396},
-    UBL:  {price:189+v,    chg:1.7,    pct:0.91,         vol:1560000,open:187, hi:191,  lo:187},
-    SNGP: {price:57+v*0.5, chg:0.4,    pct:0.71,         vol:670000, open:56.8,hi:57.5, lo:56.5},
-    DGKC: {price:118-v,    chg:-0.6,   pct:-0.51,        vol:430000, open:119, hi:119.5,lo:117.5},
-    MCB:  {price:246+v*2,  chg:2.4,    pct:0.98,         vol:980000, open:244, hi:247,  lo:243},
-  };
+// ── LAST CLOSE CACHE (localStorage) ─────────────────────────────────────
+function saveLastClose(data) {
+  try { localStorage.setItem('psx_last_close', JSON.stringify({data, ts: Date.now()})); } catch(e) {}
+}
+function loadLastClose() {
+  try {
+    const raw = localStorage.getItem('psx_last_close');
+    if (!raw) return null;
+    const {data, ts} = JSON.parse(raw);
+    // Use cached data if less than 48 hours old
+    if (Date.now() - ts < 48*60*60*1000) return data;
+  } catch(e) {}
+  return null;
+}
+
+function isMarketOpen() {
+  const pkt = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Karachi'}));
+  const d=pkt.getDay(), m=pkt.getHours()*60+pkt.getMinutes();
+  return d>=1&&d<=5&&m>=570&&m<930;
+}
+
+function getLastCloseDate() {
+  const pkt = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Karachi'}));
+  const d=pkt.getDay();
+  // Friday=5, Saturday=6 → last trading day was Friday
+  // Sunday=0 → last trading day was Friday
+  // Weekday after close → today
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  if (d===0) return 'Friday';
+  if (d===6) return 'Friday';
+  return 'yesterday';
 }
 
 // ── REFRESH ──────────────────────────────────────────────────────────────
@@ -469,18 +490,36 @@ async function refresh() {
   g('rbtn').disabled=true; g('rbtn2').disabled=true;
   g('rbtnTxt').innerHTML='<span class="spinning">↻</span>';
 
+  const marketOpen = isMarketOpen();
   const res = await fetchYF(STOCKS);
+
   if (res.ok && res.count > 0) {
     live = res.data;
     loaded = true;
-    setStatus('ok', `Live · ${res.count} stocks · Direct from PSX Data Portal`);
-    g('lastUpd').textContent = 'Updated: '+new Date().toLocaleTimeString('en-PK');
+    saveLastClose(live); // cache for when market is closed
+    if (marketOpen) {
+      setStatus('ok', `Live · ${res.count} stocks · PSX Data Portal`);
+    } else {
+      setStatus('closed', `Last close · ${res.count} stocks · PSX Data Portal`);
+    }
+    g('lastUpd').textContent = marketOpen
+      ? 'Live — updated '+new Date().toLocaleTimeString('en-PK')
+      : 'Last close — '+new Date().toLocaleDateString('en-PK',{weekday:'short',day:'numeric',month:'short'});
   } else {
-    console.warn('YF fetch failed:', res.err, '— using demo data');
-    live = mockData();
-    loaded = true;
-    setStatus('err', '⚠️ Cannot reach PSX Data Portal — showing demo data. Tap ↻ to retry.');
-    g('lastUpd').textContent = 'Demo data — tap ↻ to retry live prices';
+    // Try loading cached last-close data
+    const cached = loadLastClose();
+    if (cached) {
+      live = cached;
+      loaded = true;
+      setStatus('closed', `Last close · Cached · Market closed`);
+      g('lastUpd').textContent = 'Showing last known closing prices';
+    } else {
+      // No cache at all — use baseline data
+      live = baselineData();
+      loaded = true;
+      setStatus('closed', `Market closed · Showing reference prices`);
+      g('lastUpd').textContent = 'Market closed — open Mon–Fri 9:30–15:30 PKT';
+    }
   }
 
   g('rbtn').disabled=false; g('rbtn2').disabled=false;
@@ -489,19 +528,45 @@ async function refresh() {
   renderAll();
 }
 
+// Baseline reference prices (used only if no cache exists)
+function baselineData() {
+  return {
+    ENGRO:{price:332,  chg:0, pct:0, vol:0, open:332, hi:332, lo:332},
+    HBL:  {price:188,  chg:0, pct:0, vol:0, open:188, hi:188, lo:188},
+    LUCK: {price:1085, chg:0, pct:0, vol:0, open:1085,hi:1085,lo:1085},
+    PSO:  {price:412,  chg:0, pct:0, vol:0, open:412, hi:412, lo:412},
+    UBL:  {price:204,  chg:0, pct:0, vol:0, open:204, hi:204, lo:204},
+    SNGP: {price:61,   chg:0, pct:0, vol:0, open:61,  hi:61,  lo:61},
+    DGKC: {price:124,  chg:0, pct:0, vol:0, open:124, hi:124, lo:124},
+    MCB:  {price:258,  chg:0, pct:0, vol:0, open:258, hi:258, lo:258},
+  };
+}
+
 function setStatus(state, msg) {
   const dot=g('dot'), lbl=g('dotlbl'), b=g('banner');
   dot.className='live-dot '+state;
   lbl.className='live-label '+state;
-  if(state==='ok'){lbl.textContent='LIVE'; b.className='banner banner-delay'; b.innerHTML=`<span>📡</span><span>${msg}</span>`;}
-  else if(state==='err'){lbl.textContent='DEMO'; b.className='banner banner-err'; b.innerHTML=`<span>${msg}</span>`;}
-  else{lbl.textContent='LOADING'; b.className='banner banner-load'; b.innerHTML=`<span>⏳</span><span>Connecting to PSX Data Portal…</span>`;}
+  if(state==='ok'){
+    lbl.textContent='LIVE';
+    b.className='banner banner-delay';
+    b.innerHTML=`<span>📡</span><span>${msg}</span>`;
+  } else if(state==='closed'){
+    lbl.textContent='CLOSED';
+    b.className='banner banner-closed';
+    b.innerHTML=`<span>🔔</span><span>${msg} · Next session Mon–Fri 9:30 AM PKT</span>`;
+  } else if(state==='err'){
+    lbl.textContent='DEMO';
+    b.className='banner banner-err';
+    b.innerHTML=`<span>⚠️</span><span>${msg}</span>`;
+  } else {
+    lbl.textContent='LOADING';
+    b.className='banner banner-load';
+    b.innerHTML=`<span>⏳</span><span>Connecting to PSX Data Portal…</span>`;
+  }
 }
 
 function checkMarket() {
-  const pkt = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Karachi'}));
-  const d=pkt.getDay(), m=pkt.getHours()*60+pkt.getMinutes();
-  const open = d>=1&&d<=5&&m>=570&&m<930;
+  const open = isMarketOpen();
   const b=g('mktbadge');
   b.textContent=open?'OPEN':'CLOSED';
   b.className='mkt-badge '+(open?'mkt-open':'mkt-closed');
@@ -695,7 +760,7 @@ function openModal(ticker) {
       <div class="fitem"><div class="flbl">SECTOR</div><div class="fval" style="font-size:12px;">${cap(meta.sec)}</div></div>
       <div class="fitem"><div class="flbl">SOURCE</div><div class="fval" style="font-size:11px;">${meta.src}</div></div>
     </div>
-    <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:10px;text-align:center;">PSX Data Portal · ${ld?'Live data':'Demo mode'}</div>
+    <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:10px;text-align:center;">PSX Data Portal · ${ld?isMarketOpen()?'Live':'Last close':'No data'}</div>
     <button class="mbtn" onclick="closeModal()">Close ✕</button>
   `;
   g('moverlay').classList.add('open');
