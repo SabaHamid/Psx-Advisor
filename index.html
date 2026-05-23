@@ -250,7 +250,7 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 
     <!-- HOME -->
     <div class="page active" id="page-home">
-      <div class="banner banner-load" id="banner"><span>⏳</span><span id="bannerTxt">Connecting to Yahoo Finance for live PSX prices…</span></div>
+      <div class="banner banner-load" id="banner"><span>⏳</span><span id="bannerTxt">Connecting to PSX Data Portal for live prices…</span></div>
       <div class="section">
         <div class="section-header">
           <span class="section-title">Market Pulse</span>
@@ -421,33 +421,31 @@ const bollTxt = rsi => rsi<35?'Near lower band':rsi>68?'Upper band':'Mid band';
 // ── FETCH ────────────────────────────────────────────────────────────────
 async function fetchYF(metas) {
   const syms = metas.map(m=>m.yf).join(',');
-  // Use our own Vercel serverless proxy — no CORS issues, works on all devices
-  const apiUrl = `/api/quotes?symbols=${encodeURIComponent(syms)}`;
-  try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 10000);
-    const r = await fetch(apiUrl, {signal:ctrl.signal});
-    if (!r.ok) throw new Error('API '+r.status);
-    const j = await r.json();
-    const quotes = j?.quoteResponse?.result || [];
-    if (!quotes.length) throw new Error('No quotes');
-    const out = {};
-    quotes.forEach(q => {
-      const key = q.symbol.replace('.KA','');
-      out[key] = {
-        price: q.regularMarketPrice||0,
-        chg:   q.regularMarketChange||0,
-        pct:   q.regularMarketChangePercent||0,
-        vol:   q.regularMarketVolume||0,
-        open:  q.regularMarketOpen||0,
-        hi:    q.regularMarketDayHigh||0,
-        lo:    q.regularMarketDayLow||0
-      };
-    });
-    return {ok:true, data:out, count:quotes.length};
-  } catch(e) {
-    return {ok:false, err:e.message};
+  const yfUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(syms)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketVolume,regularMarketOpen,regularMarketDayHigh,regularMarketDayLow,regularMarketTime`;
+  const proxies = [
+    `https://corsproxy.io/?url=${encodeURIComponent(yfUrl)}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(yfUrl)}`,
+    `https://thingproxy.freeboard.io/fetch/${yfUrl}`,
+  ];
+  for (const proxy of proxies) {
+    try {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 7000);
+      const r = await fetch(proxy, {headers:{'Accept':'application/json'}, signal:ctrl.signal});
+      if (!r.ok) continue;
+      const j = await r.json();
+      const quotes = j?.quoteResponse?.result || [];
+      if (!quotes.length) continue;
+      const out = {};
+      quotes.forEach(q => {
+        const key = q.symbol.replace('.KA','');
+        out[key] = {price:q.regularMarketPrice||0, chg:q.regularMarketChange||0, pct:q.regularMarketChangePercent||0,
+                    vol:q.regularMarketVolume||0, open:q.regularMarketOpen||0, hi:q.regularMarketDayHigh||0, lo:q.regularMarketDayLow||0};
+      });
+      return {ok:true, data:out, count:quotes.length};
+    } catch(e) { continue; }
   }
+  return {ok:false, err:'All proxies failed'};
 }
 
 function mockData() {
@@ -475,14 +473,14 @@ async function refresh() {
   if (res.ok && res.count > 0) {
     live = res.data;
     loaded = true;
-    setStatus('ok', `Live · ${res.count} stocks · 15-min delay · Yahoo Finance`);
+    setStatus('ok', `Live · ${res.count} stocks · Direct from PSX Data Portal`);
     g('lastUpd').textContent = 'Updated: '+new Date().toLocaleTimeString('en-PK');
   } else {
     console.warn('YF fetch failed:', res.err, '— using demo data');
     live = mockData();
     loaded = true;
-    setStatus('err', '⚠️ Cannot reach Yahoo Finance — showing demo data. Tap ↻ to retry.');
-    g('lastUpd').textContent = 'Demo data — tap ↻ to retry';
+    setStatus('err', '⚠️ Cannot reach PSX Data Portal — showing demo data. Tap ↻ to retry.');
+    g('lastUpd').textContent = 'Demo data — tap ↻ to retry live prices';
   }
 
   g('rbtn').disabled=false; g('rbtn2').disabled=false;
@@ -497,7 +495,7 @@ function setStatus(state, msg) {
   lbl.className='live-label '+state;
   if(state==='ok'){lbl.textContent='LIVE'; b.className='banner banner-delay'; b.innerHTML=`<span>📡</span><span>${msg}</span>`;}
   else if(state==='err'){lbl.textContent='DEMO'; b.className='banner banner-err'; b.innerHTML=`<span>${msg}</span>`;}
-  else{lbl.textContent='LOADING'; b.className='banner banner-load'; b.innerHTML=`<span>⏳</span><span>Connecting to Yahoo Finance…</span>`;}
+  else{lbl.textContent='LOADING'; b.className='banner banner-load'; b.innerHTML=`<span>⏳</span><span>Connecting to PSX Data Portal…</span>`;}
 }
 
 function checkMarket() {
@@ -697,7 +695,7 @@ function openModal(ticker) {
       <div class="fitem"><div class="flbl">SECTOR</div><div class="fval" style="font-size:12px;">${cap(meta.sec)}</div></div>
       <div class="fitem"><div class="flbl">SOURCE</div><div class="fval" style="font-size:11px;">${meta.src}</div></div>
     </div>
-    <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:10px;text-align:center;">Yahoo Finance · ${ld?'Live data (15-min delay)':'Demo mode'}</div>
+    <div style="font-family:var(--font-mono);font-size:10px;color:var(--muted);margin-top:10px;text-align:center;">PSX Data Portal · ${ld?'Live data':'Demo mode'}</div>
     <button class="mbtn" onclick="closeModal()">Close ✕</button>
   `;
   g('moverlay').classList.add('open');
@@ -712,7 +710,7 @@ async function searchTicker() {
   const known=STOCKS.find(s=>s.t===raw);
   if(known){openModal(raw);}
   else {
-    const meta={t:raw,yf:raw+'.KA',n:raw,sec:'unknown',rsiB:50,pe:'—',src:'Search',reason:'Data fetched live from Yahoo Finance.'};
+    const meta={t:raw,yf:raw+'.KA',n:raw,sec:'unknown',rsiB:50,pe:'—',src:'Search',reason:'Data fetched live from PSX Data Portal.'};
     const res=await fetchYF([meta]);
     if(res.ok&&res.data[raw]){live[raw]=res.data[raw];STOCKS.push(meta);openModal(raw);}
     else alert(`"${raw}.KA" not found.\n\nTry: ENGRO, HBL, LUCK, PSO, UBL, OGDC, PPL, MCB, BAHL, FCCL, SNGP, DGKC`);
